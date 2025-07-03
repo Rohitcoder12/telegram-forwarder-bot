@@ -1,4 +1,4 @@
-# app.py
+# app.py (Debugging Version)
 import os
 import asyncio
 import threading
@@ -46,7 +46,6 @@ API_HASH = get_env('API_HASH', 'API_HASH not set.')
 BOT_TOKEN = get_env('BOT_TOKEN', 'BOT_TOKEN not set.')
 ADMIN_ID = get_env('ADMIN_ID', 'ADMIN_ID not set.', int)
 
-# THIS IS THE CORRECTED INITIALIZATION
 control_bot = Client(
     "data/control_bot_session",
     api_id=API_ID,
@@ -59,14 +58,19 @@ admin_filter = filters.user(ADMIN_ID)
 
 # --- Control Bot Command Handlers ---
 
-@control_bot.on_message(filters.command("login") & admin_filter)
+# THIS IS THE LINE WE CHANGED FOR THE TEST
+@control_bot.on_message(filters.command("login"))
 async def login_start(client, message: Message):
+    # For this test, we'll temporarily add a check inside
+    sender_id = message.from_user.id
+    logger_control.info(f"/login command received from user ID: {sender_id}. Configured ADMIN_ID is: {ADMIN_ID}")
+    
     config = load_config()
     if config.get("user_session_string"):
         await message.reply_text("You are already logged in. Use `/logout` first if you want to switch accounts.")
         return
 
-    login_state[ADMIN_ID] = {"state": "awaiting_phone"}
+    login_state[sender_id] = {"state": "awaiting_phone"}
     await message.reply_text("Please send the phone number of the account you want to use for forwarding (in international format, e.g., +11234567890).")
 
 @control_bot.on_message(filters.command("logout") & admin_filter)
@@ -87,8 +91,9 @@ async def logout(client, message: Message):
     ~filters.command(["login", "logout", "add", "addsource", "delete", "list"])
 )
 async def handle_login_steps(client, message: Message):
-    if ADMIN_ID not in login_state: return
-    state_data = login_state[ADMIN_ID]
+    sender_id = message.from_user.id
+    if sender_id not in login_state: return
+    state_data = login_state[sender_id]
     current_state = state_data.get("state")
 
     if current_state == "awaiting_phone":
@@ -100,7 +105,7 @@ async def handle_login_steps(client, message: Message):
             state_data.update({"state": "awaiting_otp", "phone": phone, "phone_code_hash": sent_code.phone_code_hash})
             await message.reply_text("An OTP has been sent to your Telegram account. Please send it here.")
         except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
+            await message.reply_text(f"Error during login: {e}"); del login_state[sender_id]
         finally:
             await temp_client.disconnect()
 
@@ -112,11 +117,11 @@ async def handle_login_steps(client, message: Message):
             await temp_client.sign_in(state_data["phone"], state_data["phone_code_hash"], otp)
             session_string = await temp_client.export_session_string()
             config = load_config(); config["user_session_string"] = session_string; save_config(config)
-            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[ADMIN_ID]
+            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[sender_id]
         except errors.SessionPasswordNeeded:
             state_data["state"] = "awaiting_password"; await message.reply_text("Your account has Two-Step Verification enabled. Please send your password.")
         except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
+            await message.reply_text(f"Error during login: {e}"); del login_state[sender_id]
         finally:
             await temp_client.disconnect()
 
@@ -128,9 +133,9 @@ async def handle_login_steps(client, message: Message):
             await temp_client.check_password(password)
             session_string = await temp_client.export_session_string()
             config = load_config(); config["user_session_string"] = session_string; save_config(config)
-            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[ADMIN_ID]
+            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[sender_id]
         except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
+            await message.reply_text(f"Error during login: {e}"); del login_state[sender_id]
         finally:
             await temp_client.disconnect()
 
@@ -138,6 +143,7 @@ async def handle_login_steps(client, message: Message):
 
 @control_bot.on_message(filters.command("add") & admin_filter)
 async def add_forward(client, message: Message):
+    # ... (code is unchanged)
     parts = message.text.split()
     if len(parts) != 3:
         await message.reply_text("<b>Usage:</b> <code>/add <forward_name> <destination_id></code>")
@@ -157,6 +163,7 @@ async def add_forward(client, message: Message):
 
 @control_bot.on_message(filters.command("addsource") & admin_filter)
 async def add_source(client, message: Message):
+    # ... (code is unchanged)
     parts = message.text.split()
     if len(parts) < 3:
         await message.reply_text("<b>Usage:</b> <code>/addsource <forward_name> <source_id_1> [source_id_2]...</code>")
@@ -183,6 +190,7 @@ async def add_source(client, message: Message):
 
 @control_bot.on_message(filters.command("delete") & admin_filter)
 async def delete_forward(client, message: Message):
+    # ... (code is unchanged)
     parts = message.text.split()
     if len(parts) != 2: await message.reply_text("<b>Usage:</b> <code>/delete <forward_name></code>"); return
     _, name = parts
@@ -195,6 +203,7 @@ async def delete_forward(client, message: Message):
 
 @control_bot.on_message(filters.command("list") & admin_filter)
 async def list_forwards(client, message: Message):
+    # ... (code is unchanged)
     config = load_config()
     forwards = config.get("forwards", {})
     if not forwards:
@@ -211,6 +220,7 @@ async def list_forwards(client, message: Message):
 
 # --- Userbot Forwarding Logic ---
 async def manage_userbot():
+    # ... (code is unchanged)
     global user_bot
     while True:
         await asyncio.sleep(5)
