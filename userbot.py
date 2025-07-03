@@ -6,73 +6,74 @@ import logging
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait
 
-# --- Basic Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [Userbot] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Configuration Management ---
 CONFIG_FILE_PATH = "data/config.json"
-
-def get_env(name, message, cast=str):
-    if name in os.environ:
-        return cast(os.environ[name])
-    logger.error(message)
-    exit(1)
 
 def load_config():
     if os.path.exists(CONFIG_FILE_PATH):
         with open(CONFIG_FILE_PATH, 'r') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {} # Return empty config if file is empty or malformed
+            try: return json.load(f)
+            except json.JSONDecodeError: return {}
     return {}
 
-# --- Pyrogram Userbot Setup ---
-API_ID = get_env('API_ID', 'Error: API_ID not found.', int)
-API_HASH = get_env('API_HASH', 'Error: API_HASH not found.')
-
-app = Client("data/my_forwarder_session", api_id=API_ID, api_hash=API_HASH)
-
-# --- Core Forwarding Logic ---
-@app.on_message(filters.private | filters.group)
-async def main_forwarder(client: Client, message):
-    # Load the latest config on every message to get real-time updates
-    config_cache = load_config()
-    if not config_cache:
-        return # Do nothing if no config exists
-
-    chat_id = message.chat.id
+async def main():
+    logger.info("Userbot worker started. Waiting for session string in config...")
     
-    for name, config in config_cache.items():
-        if chat_id in config.get("sources", []):
-            destination = config.get("destination")
-            if not destination:
-                continue
+    user_client = None
 
-            logger.info(f"Forwarding from source {chat_id} to {destination} (Rule: {name})")
-            try:
-                await message.copy(destination)
-            except FloodWait as e:
-                logger.warning(f"FloodWait: Waiting for {e.x} seconds.")
-                await asyncio.sleep(e.x)
-                await message.copy(destination) # Retry
-            except Exception as e:
-                logger.error(f"Could not forward message: {e}")
-            break # Stop after first match
+    while True:
+        await asyncio.sleep(5) # Check for config changes every 5 seconds
+        config = load_config()
+        session_string = config.get("user_session_string")
 
-# --- Main Execution ---
-async def run_userbot():
-    logger.info("Starting the Userbot (Forwarder)...")
-    await app.start()
-    logger.info("Userbot is running and forwarding messages.")
-    await asyncio.Event().wait()
+        if session_string:
+            if not user_client:
+                # If there's a session string and client is not running, start it
+                logger.info("Session string found. Initializing user client...")
+                user_client = Client("user_forwarder_session", session_string=session_string)
+                try:
+                    await user_client.start()
+                    me = await user_client.get_me()
+                    logger.info(f"User client logged in as {me.first_name} (@{me.username})")
+                except Exception as e:
+                    logger.error(f"Failed to start user client: {e}")
+                    user_client = None # Reset on failure
+                    continue
+            
+            # This is where you would place your forwarding logic
+            # For simplicity, we define it right here
+            @user_client.on_message(filters.private | filters.group, group=1)
+            async def forwarder_logic(client, message):
+                # Always load the latest config to get new rules instantly
+                current_config = load_config()
+                forwards = current_config.get("forwards", {})
+                chat_id = message.chat.id
+                
+                for name, rule in forwards.items():
+                    if chat_id in rule.get("sources", []):
+                        destination = rule.get("destination")
+                        if not destination: continue
+                        
+                        logger.info(f"Forwarding from {chat_id} to {destination} (Rule: {name})")
+                        try:
+                            await message.copy(destination)
+                        except FloodWait as e:
+                            logger.warning(f"FloodWait: Waiting {e.x}s")
+                            await asyncio.sleep(e.x)
+                            await message.copy(destination)
+                        except Exception as e:
+                            logger.error(f"Forwarding failed: {e}")
+                        break
+
+        elif not session_string and user_client:
+            # If session string is removed (logout) and client is running, stop it
+            logger.info("Session string removed. Logging out and stopping user client...")
+            await user_client.stop()
+            user_client = None
+            logger.info("User client stopped.")
 
 if __name__ == "__main__":
-    if not os.path.exists('data'):
-        os.makedirs('data')
-    
-    try:
-        asyncio.run(run_userbot())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Userbot stopped.")
+    if not os.path.exists('data'): os.makedirs('data')
+    asyncio.run(main())
