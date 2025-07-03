@@ -1,1 +1,1 @@
-web: python forwarder.py
+web: python app.py
