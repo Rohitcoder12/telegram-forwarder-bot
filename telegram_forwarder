@@ -1,0 +1,68 @@
+import asyncio
+from pyrogram import Client, filters
+from pyrogram.errors import FloodWait
+
+# --- CONFIGURATION ---
+# Get your API_ID and API_HASH from my.telegram.org
+API_ID = 1234567  # Replace with your API_ID
+API_HASH = "YOUR_API_HASH"  # Replace with your API_HASH
+
+# The session name is a file that will be created to store your login session.
+# You can name it anything you want.
+SESSION_NAME = "my_forwarder_session"
+
+# A list of chat IDs from where you want to forward messages.
+# These can be channel IDs, group IDs, or user/bot IDs.
+# Example: [-1001234567890, -1009876543210, 123456789]
+SOURCE_CHATS = [-1001234567890]  # Replace with your source chat ID(s)
+
+# The chat ID of the destination channel or group.
+# Make sure your user account is a member of this chat.
+DESTINATION_CHANNEL = -1009876543210  # Replace with your destination channel ID
+
+# --- INITIALIZATION ---
+# Initialize the Pyrogram Client
+# The session will be saved in a file named `my_forwarder_session.session`
+app = Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH)
+
+# --- THE FORWARDING LOGIC ---
+@app.on_message(filters.chat(SOURCE_CHATS))
+async def forward_message(client, message):
+    """
+    This function is triggered whenever a new message arrives in any of the SOURCE_CHATS.
+    """
+    print(f"Detected message from {message.chat.title}. Forwarding...")
+
+    try:
+        # Using copy_message is better for restricted channels.
+        # It sends a new copy of the message, making it look like you sent it.
+        # It bypasses "forwarding not allowed" restrictions.
+        await message.copy(DESTINATION_CHANNEL)
+        print("Message forwarded successfully!")
+
+    except FloodWait as e:
+        # If we send too many messages too quickly, Telegram will temporarily block us.
+        # This exception handles that by waiting for the specified amount of time.
+        print(f"FloodWait detected. Waiting for {e.x} seconds.")
+        await asyncio.sleep(e.x)
+        # After waiting, we try to forward the message again.
+        await message.copy(DESTINATION_CHANNEL)
+        print("Message forwarded successfully after waiting.")
+
+    except Exception as e:
+        # Catch any other exceptions and print them.
+        print(f"An error occurred: {e}")
+
+
+# --- START THE CLIENT ---
+async def main():
+    print("Starting the forwarder bot...")
+    await app.start()
+    print("Bot is running and listening for new messages.")
+    await asyncio.Event().wait()  # Keep the script running indefinitely
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        print("Bot stopped.")
