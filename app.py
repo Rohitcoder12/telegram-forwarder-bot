@@ -73,8 +73,12 @@ async def logout(client, message: Message):
         await message.reply_text("You are not logged in.")
 
 # --- Main Message Handler for Login Steps ---
-# THIS IS THE CORRECTED LINE
-@control_bot.on_message(filters.private & admin_filter & ~filters.command(prefixes="/"))
+@control_bot.on_message(
+    filters.text &
+    filters.private &
+    admin_filter &
+    ~filters.command(["login", "logout", "add", "addsource", "delete", "list"])
+)
 async def handle_login_steps(client, message: Message):
     if ADMIN_ID not in login_state: return
     state_data = login_state[ADMIN_ID]
