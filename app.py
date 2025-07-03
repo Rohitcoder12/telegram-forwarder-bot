@@ -46,7 +46,14 @@ API_HASH = get_env('API_HASH', 'API_HASH not set.')
 BOT_TOKEN = get_env('BOT_TOKEN', 'BOT_TOKEN not set.')
 ADMIN_ID = get_env('ADMIN_ID', 'ADMIN_ID not set.', int)
 
-control_bot = Client("data/control_bot_session", bot_token=BOT_TOKEN)
+# THIS IS THE CORRECTED INITIALIZATION
+control_bot = Client(
+    "data/control_bot_session",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
 user_bot = None
 admin_filter = filters.user(ADMIN_ID)
 
