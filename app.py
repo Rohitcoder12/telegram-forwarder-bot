@@ -1,4 +1,4 @@
-# app.py (Hybrid Version with API-Managed Config)
+# app.py (Hybrid Version with API-Managed Config - CORRECTED)
 import os
 import asyncio
 import threading
@@ -7,6 +7,7 @@ import logging
 import requests
 from flask import Flask
 from pyrogram import Client, filters, errors
+from pyrogram.types import Message  # <--- THE FIX IS HERE
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
@@ -55,19 +56,38 @@ def get_koyeb_config():
         return None
 
 def update_koyeb_config(new_config_json):
-    payload = {
-        "definition": {
-            "env": [
-                {"key": "FORWARD_CONFIG_JSON", "value": json.dumps(new_config_json)}
-            ]
-        }
-    }
+    # First, get the full current service definition to preserve other env vars
     try:
-        response = requests.patch(KOYEB_API_URL, headers=KOYEB_HEADERS, json=payload)
-        response.raise_for_status()
+        get_response = requests.get(KOYEB_API_URL, headers=KOYEB_HEADERS)
+        get_response.raise_for_status()
+        service_data = get_response.json().get("service", {})
+        current_definition = service_data.get("definition", {})
+    except Exception as e:
+        logger_control.error(f"Failed to fetch full service definition before update: {e}")
+        return False
+        
+    # Find and update the FORWARD_CONFIG_JSON variable
+    env_vars = current_definition.get("env", [])
+    config_found = False
+    for i, env_var in enumerate(env_vars):
+        if env_var.get("key") == "FORWARD_CONFIG_JSON":
+            env_vars[i]["value"] = json.dumps(new_config_json)
+            config_found = True
+            break
+    
+    # If it doesn't exist, add it
+    if not config_found:
+        env_vars.append({"key": "FORWARD_CONFIG_JSON", "value": json.dumps(new_config_json)})
+
+    # Construct the payload for the PATCH request
+    payload = { "definition": { "env": env_vars } }
+
+    try:
+        patch_response = requests.patch(KOYEB_API_URL, headers=KOYEB_HEADERS, json=payload)
+        patch_response.raise_for_status()
         return True
     except Exception as e:
-        logger_control.error(f"Failed to update Koyeb config: {e}")
+        logger_control.error(f"Failed to update Koyeb config: {e} - Response: {patch_response.text}")
         return False
 
 # --- Pyrogram Clients ---
@@ -169,7 +189,7 @@ async def run_userbot():
     user_bot = Client("user_bot_session", session_string=USER_SESSION_STRING, in_memory=True)
 
     @user_bot.on_message(filters.chat(source_chats) & ~filters.service if source_chats else filters.false)
-    async def forwarder_handler(client, message):
+    async def forwarder_handler(client, message: Message):
         # The rules are fixed at startup, a redeploy is needed to update them
         for name, rule in forward_rules.items():
             if message.chat.id in rule.get("sources", []):
