@@ -1,4 +1,4 @@
-# app.py (FINAL - Render.com File-Based Session Version)
+# app.py (FINAL - Render Login Helper Version)
 import os
 import asyncio
 import threading
@@ -7,23 +7,18 @@ import logging
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.errors import FloodWait
+from pyrogram.errors import SessionPasswordNeeded
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s')
 logger_control = logging.getLogger('ControlBot')
 logger_user = logging.getLogger('UserBot')
 
-# The persistent disk on Render will be mounted at /data
-# We will store all our files there.
-SESSION_FILE_PATH = "/data/user_forwarder.session"
-CONFIG_FILE_PATH = "/data/config.json"
-
 flask_app = Flask(__name__)
 @flask_app.route('/')
 def health_check(): return "Bot is alive!", 200
 def run_flask():
-    port = int(os.environ.get("PORT", 10000)) # Render uses PORT 10000
+    port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
 
 # --- Environment Variable Loading ---
@@ -37,64 +32,100 @@ API_ID = get_env('API_ID', 'API_ID not set!', cast=int)
 API_HASH = get_env('API_HASH', 'API_HASH not set!')
 BOT_TOKEN = get_env('BOT_TOKEN', 'BOT_TOKEN not set!')
 ADMIN_ID = get_env('ADMIN_ID', 'ADMIN_ID not set!', cast=int)
-
-# --- Configuration Management (File-based) ---
-def load_config():
-    if os.path.exists(CONFIG_FILE_PATH):
-        with open(CONFIG_FILE_PATH, 'r') as f:
-            try: return json.load(f)
-            except json.JSONDecodeError: return {"forwards": {}}
-    return {"forwards": {}}
-
-def save_config(config_data):
-    with open(CONFIG_FILE_PATH, 'w') as f:
-        json.dump(config_data, f, indent=4)
+# SESSION_STRING is now optional. We will generate it.
+SESSION_STRING = get_env('SESSION_STRING', 'SESSION_STRING not set.', required=False)
 
 # --- Pyrogram Clients ---
-# The control bot can run in memory
 control_bot = Client("control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
-# The user bot will use the session file on the persistent disk
-user_bot = Client(SESSION_FILE_PATH, api_id=API_ID, api_hash=API_HASH)
 admin_filter = filters.user(ADMIN_ID)
+login_process_active = False
 
 # --- Control Bot Commands ---
 @control_bot.on_message(filters.command("start") & admin_filter)
 async def start_command(client, message):
-    await message.reply_text("👋 **Render Forwarder Bot**\n\nI am online. Use `/add`, `/list` to manage rules.")
+    if SESSION_STRING:
+        await message.reply_text("✅ Bot is online and the user account is logged in. Forwarding is active.")
+    else:
+        await message.reply_text("👋 Bot is online. The user account is NOT logged in.\n\nPlease use the `/login` command to generate your session string.")
 
-@control_bot.on_message(filters.command("add") & admin_filter)
-async def add_forward(client, message):
-    parts = message.text.split()
-    if len(parts) != 3: await message.reply_text("<b>Usage:</b> <code>/add <name> <dest_id></code>"); return
-    _, name, dest_id_str = parts; dest_id = int(dest_id_str)
+@control_bot.on_message(filters.command("login") & admin_filter)
+async def login_command(client, message):
+    global login_process_active
+    if login_process_active:
+        await message.reply_text("A login process is already active.")
+        return
     
-    config = load_config()
-    config["forwards"][name] = {"destination": dest_id, "sources": []}
-    save_config(config)
-    await message.reply_text(f"✅ Rule '<code>{name}</code>' created. Userbot will apply it on next restart (or instantly if already running).")
+    login_process_active = True
+    temp_client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
+    
+    try:
+        await temp_client.connect()
+        phone_number = await client.ask(ADMIN_ID, "Please send your phone number in international format (e.g., +91...):", filters=filters.text, timeout=300)
+        
+        sent_code = await temp_client.send_code(phone_number.text)
+        
+        otp = await client.ask(ADMIN_ID, "An OTP has been sent to your Telegram account. Please send it here:", filters=filters.text, timeout=300)
 
-# (Add your other command handlers like /addsource, /delete, /list here)
+        await temp_client.sign_in(phone_number.text, sent_code.phone_code_hash, otp.text)
+        
+    except SessionPasswordNeeded:
+        password = await client.ask(ADMIN_ID, "Your account has 2FA enabled. Please send your password:", filters=filters.text, timeout=300)
+        await temp_client.check_password(password.text)
+        
+    except Exception as e:
+        await message.reply_text(f"❌ Login failed. Error: {e}")
+        login_process_active = False
+        await temp_client.disconnect()
+        return
 
-# --- Userbot Handler ---
-@user_bot.on_message(~filters.service, group=1)
-async def forwarder_handler(client, message):
-    config = load_config() # Load the latest rules on every message
-    forwards = config.get("forwards", {})
-    source_chats = {src for rule in forwards.values() for src in rule["sources"]}
-    if message.chat.id in source_chats:
-        for name, rule in forwards.items():
-            if message.chat.id in rule["sources"]:
-                await message.copy(rule["destination"])
-                break
-
-# --- Main Application Start ---
-async def main():
-    await asyncio.gather(
-        control_bot.start(),
-        user_bot.start() # This will prompt for login in the logs on the first run
+    session_str = await temp_client.export_session_string()
+    await temp_client.disconnect()
+    
+    await message.reply_text(
+        "✅ **Login Successful!**\n\n"
+        "Here is your session string. It is a secret!\n\n"
+        "1. Copy this string.\n"
+        "2. Go to your Render dashboard -> Environment.\n"
+        "3. Create a new environment variable named `SESSION_STRING`.\n"
+        "4. Paste this string as the value and mark it as a secret.\n"
+        "5. The bot will restart automatically, and the forwarder will be active.\n\n"
+        f"<code>{session_str}</code>"
     )
-    logger_control.info(f"Control Bot started.")
-    logger_user.info(f"UserBot started.")
+    login_process_active = False
+
+# --- Userbot and Main Startup ---
+async def run_userbot_if_configured():
+    if not SESSION_STRING:
+        logger_user.info("SESSION_STRING not set. Userbot will not be started.")
+        return
+
+    logger_user.info("SESSION_STRING found. Starting Userbot...")
+    user_bot = Client("user_bot_session", session_string=SESSION_STRING, in_memory=True)
+    
+    # You can add your forwarding logic here later.
+    # For now, we just want to see it log in.
+    @user_bot.on_message(filters.all)
+    async def log_all(client, message):
+        logger_user.info(f"Userbot saw a message in chat: {message.chat.id}")
+
+    try:
+        await user_bot.start()
+        me = await user_bot.get_me()
+        logger_user.info(f"UserBot started successfully as {me.first_name}")
+        await control_bot.send_message(ADMIN_ID, f"✅ **Forwarder is ACTIVE!**\nUser account logged in: **{me.first_name}**")
+    except Exception as e:
+        logger_user.error(f"CRITICAL: Userbot failed to start. Is SESSION_STRING valid? Error: {e}")
+        await control_bot.send_message(ADMIN_ID, f"❌ **ERROR:** Userbot failed to start.\nReason: `{e}`")
+
+async def main():
+    # Start the control bot first, always.
+    await control_bot.start()
+    me_control = await control_bot.get_me()
+    logger_control.info(f"Control Bot started as {me_control.first_name}")
+
+    # Then, start the userbot in a background task so it doesn't block anything.
+    asyncio.create_task(run_userbot_if_configured())
+    
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
