@@ -1,4 +1,4 @@
-# app.py (FINAL - Hybrid Version with Corrected Startup)
+# app.py (FINAL - Hybrid Version with Corrected Filter)
 import os
 import asyncio
 import threading
@@ -33,8 +33,6 @@ API_HASH = get_env('API_HASH', 'API_HASH not set!')
 BOT_TOKEN = get_env('BOT_TOKEN', 'BOT_TOKEN not set!')
 ADMIN_ID = get_env('ADMIN_ID', 'ADMIN_ID not set!', cast=int)
 USER_SESSION_STRING = get_env('USER_SESSION_STRING', 'USER_SESSION_STRING not set!')
-
-# Koyeb API configuration
 KOYEB_API_TOKEN = get_env('KOYEB_API_TOKEN', 'KOYEB_API_TOKEN not set!')
 KOYEB_SERVICE_ID = get_env('KOYEB_SERVICE_ID', 'KOYEB_SERVICE_ID not set!')
 KOYEB_API_URL = f"https://app.koyeb.com/v1/services/{KOYEB_SERVICE_ID}"
@@ -174,8 +172,10 @@ except json.JSONDecodeError:
     logger_user.error("Invalid FORWARD_CONFIG_JSON, UserBot will not forward.")
     source_chats = []
 
-@user_bot.on_message(filters.chat(source_chats) & ~filters.service if source_chats else filters.false)
+# THIS IS THE CORRECTED LINE
+@user_bot.on_message(filters.chat(source_chats) & ~filters.service if source_chats else filters.create(lambda _, __: False))
 async def forwarder_handler(client, message: Message):
+    # Re-read rules from the live object in case they have changed (they won't in this model without a restart, but good practice)
     for name, rule in forward_rules.items():
         if message.chat.id in rule.get("sources", []):
             await message.copy(rule["destination"])
