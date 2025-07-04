@@ -104,8 +104,7 @@ async def add_forward(client, message: Message):
     else:
         await msg.edit_text("❌ Failed to update config on Koyeb.")
 
-# (Add your /addsource, /delete, /list handlers here, they are unchanged)
-# ...
+# (Your /addsource, /delete, /list handlers go here...)
 
 # --- Main Application Start ---
 async def run_userbot():
@@ -124,7 +123,6 @@ async def run_userbot():
         for name, rule in forward_rules.items():
             if message.chat.id in rule.get("sources", []):
                 await message.copy(rule["destination"])
-                logger_user.info(f"Forwarded message from {message.chat.id} via rule '{name}'")
                 break
     try:
         await user_bot.start()
