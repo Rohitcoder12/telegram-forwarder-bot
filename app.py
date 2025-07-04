@@ -1,4 +1,4 @@
-# app.py (Final Version with /start command)
+# app.py (Stateless Version for Free Tier)
 import os
 import asyncio
 import threading
@@ -20,264 +20,254 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     flask_app.run(host="0.0.0.0", port=port)
 
-# --- Config and State Management ---
-CONFIG_FILE_PATH = "data/config.json"
-login_state = {}
-
-def get_env(name, message, cast=str):
+# --- Environment Variable Loading ---
+def get_env(name, message, cast=str, required=True):
     if name in os.environ:
         return cast(os.environ[name])
-    logging.critical(message)
-    exit(1)
+    if required:
+        logging.critical(message)
+        exit(1)
+    return None
 
-def load_config():
-    if not os.path.exists(CONFIG_FILE_PATH): return {}
-    with open(CONFIG_FILE_PATH, 'r') as f:
-        try: return json.load(f)
-        except json.JSONDecodeError: return {}
-
-def save_config(config):
-    with open(CONFIG_FILE_PATH, 'w') as f:
-        json.dump(config, f, indent=4)
-
-# --- Pyrogram Clients Setup ---
 API_ID = get_env('API_ID', 'API_ID not set.', int)
 API_HASH = get_env('API_HASH', 'API_HASH not set.')
 BOT_TOKEN = get_env('BOT_TOKEN', 'BOT_TOKEN not set.')
 ADMIN_ID = get_env('ADMIN_ID', 'ADMIN_ID not set.', int)
+CONFIG_CHANNEL_ID = get_env('CONFIG_CHANNEL_ID', 'CONFIG_CHANNEL_ID not set.', int)
+USER_SESSION_STRING = get_env('USER_SESSION_STRING', 'USER_SESSION_STRING not set.', required=False)
 
-control_bot = Client(
-    "data/control_bot_session",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# This will hold the ID of our config message
+config_message_id = None
 
+# --- New Configuration Management (using Telegram Channel) ---
+async def get_config_message_id(client):
+    global config_message_id
+    if config_message_id:
+        return config_message_id
+    
+    # Search for a pinned message to use as our config
+    try:
+        async for msg in client.get_chat_history(CONFIG_CHANNEL_ID, limit=20):
+             if msg.is_pinned:
+                 config_message_id = msg.id
+                 logger_control.info(f"Found pinned config message with ID: {config_message_id}")
+                 return config_message_id
+    except Exception as e:
+        logger_control.error(f"Could not search for config message. Is the bot an admin in the config channel? Error: {e}")
+        return None
+    
+    logger_control.warning("No pinned config message found. Use /bootstrap to create one.")
+    return None
+
+async def load_config(client):
+    msg_id = await get_config_message_id(client)
+    if not msg_id:
+        return {}
+    try:
+        msg = await client.get_messages(CONFIG_CHANNEL_ID, msg_id)
+        return json.loads(msg.text)
+    except Exception as e:
+        logger_control.error(f"Failed to load/parse config from message: {e}")
+        return {}
+
+async def save_config(client, config_data):
+    msg_id = await get_config_message_id(client)
+    if not msg_id:
+        logger_control.error("Cannot save config, no config message ID found. Use /bootstrap.")
+        return
+    try:
+        await client.edit_message_text(
+            chat_id=CONFIG_CHANNEL_ID,
+            message_id=msg_id,
+            text=json.dumps(config_data, indent=4)
+        )
+    except Exception as e:
+        logger_control.error(f"Failed to save config: {e}")
+
+# --- Pyrogram Clients Setup ---
+control_bot = Client("control_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 user_bot = None
 admin_filter = filters.user(ADMIN_ID)
 
-# --- Control Bot Command Handlers ---
+# --- Control Bot Commands ---
 
 @control_bot.on_message(filters.command("start") & admin_filter)
 async def start_command(client, message: Message):
-    logger_control.info(f"/start command received from user ID: {message.from_user.id}. Your configured ADMIN_ID is: {ADMIN_ID}")
-    welcome_text = (
-        "👋 **Welcome to your Forwarder Bot!**\n\n"
-        "This bot helps you forward messages from private/restricted channels.\n\n"
-        "**Available Commands:**\n"
-        "🔹 `/login` - Start the process to log in with a user account.\n"
-        "🔹 `/logout` - Log out the current user account.\n"
-        "🔹 `/add <name> <dest_id>` - Create a new forward rule.\n"
-        "🔹 `/addsource <name> <src_id>` - Add a source to a rule.\n"
-        "🔹 `/delete <name>` - Delete a forward rule.\n"
-        "🔹 `/list` - Show all configured rules.\n\n"
-        "To begin, please use the `/login` command."
+    await message.reply_text(
+        "👋 **Stateless Forwarder Bot**\n\n"
+        "1. First, create a config message with `/bootstrap`.\n"
+        "2. If you don't have a user session string, get one with `/getsession`.\n"
+        "3. Add the session string to the `USER_SESSION_STRING` env var on Koyeb.\n"
+        "4. Use `/add`, `/list` etc. to manage forwards."
     )
-    await message.reply_text(welcome_text)
 
+@control_bot.on_message(filters.command("bootstrap") & admin_filter)
+async def bootstrap(client, message: Message):
+    """Creates the initial config message in the channel."""
+    try:
+        msg = await client.send_message(CONFIG_CHANNEL_ID, text=json.dumps({}, indent=4))
+        await client.pin_chat_message(CONFIG_CHANNEL_ID, msg.id, disable_notification=True)
+        global config_message_id
+        config_message_id = msg.id
+        await message.reply_text(f"✅ Successfully created and pinned config message with ID `{msg.id}` in your config channel.")
+    except Exception as e:
+        await message.reply_text(f"❌ Failed to bootstrap. Ensure the bot is an admin in the config channel with pin permissions. Error: {e}")
 
-@control_bot.on_message(filters.command("login") & admin_filter)
-async def login_start(client, message: Message):
-    config = load_config()
-    if config.get("user_session_string"):
-        await message.reply_text("You are already logged in. Use `/logout` first if you want to switch accounts.")
+@control_bot.on_message(filters.command("getsession") & admin_filter)
+async def get_session_command(client, message: Message):
+    await message.reply_text(
+        "This command will generate a session string.\n"
+        "**WARNING:** The session will be sent here. It's recommended to delete these messages after use.\n\n"
+        "Please send the phone number for the forwarding account (e.g., +11234567890)."
+    )
+    # This is a simplified, one-off login flow
+    try:
+        phone_msg = await client.listen(chat_id=message.chat.id, user_id=ADMIN_ID, timeout=300)
+        phone = phone_msg.text
+        
+        temp_client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
+        await temp_client.connect()
+        
+        sent_code = await temp_client.send_code(phone)
+        await phone_msg.reply("OTP sent. Please send it here.")
+        
+        otp_msg = await client.listen(chat_id=message.chat.id, user_id=ADMIN_ID, timeout=300)
+        otp = otp_msg.text
+        
+        await temp_client.sign_in(phone, sent_code.phone_code_hash, otp)
+        
+    except errors.SessionPasswordNeeded:
+        await otp_msg.reply("2FA password needed. Please send it here.")
+        pass_msg = await client.listen(chat_id=message.chat.id, user_id=ADMIN_ID, timeout=300)
+        password = pass_msg.text
+        await temp_client.check_password(password)
+        
+    except Exception as e:
+        await message.reply_text(f"An error occurred: {e}")
+        if 'temp_client' in locals() and temp_client.is_connected:
+            await temp_client.disconnect()
         return
 
-    login_state[ADMIN_ID] = {"state": "awaiting_phone"}
-    await message.reply_text("Please send the phone number of the account you want to use for forwarding (in international format, e.g., +11234567890).")
-
-@control_bot.on_message(filters.command("logout") & admin_filter)
-async def logout(client, message: Message):
-    config = load_config()
-    if "user_session_string" in config:
-        del config["user_session_string"]
-        save_config(config)
-        await message.reply_text("✅ You have been successfully logged out. The forwarder will stop.\nUse `/login` to start again.")
-    else:
-        await message.reply_text("You are not logged in.")
-
-# --- Main Message Handler for Login Steps ---
-@control_bot.on_message(
-    filters.text &
-    filters.private &
-    admin_filter &
-    ~filters.command(["start", "login", "logout", "add", "addsource", "delete", "list"])
-)
-async def handle_login_steps(client, message: Message):
-    if ADMIN_ID not in login_state: return
-    state_data = login_state[ADMIN_ID]
-    current_state = state_data.get("state")
-
-    if current_state == "awaiting_phone":
-        phone = message.text
-        temp_client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
-        try:
-            await temp_client.connect()
-            sent_code = await temp_client.send_code(phone)
-            state_data.update({"state": "awaiting_otp", "phone": phone, "phone_code_hash": sent_code.phone_code_hash})
-            await message.reply_text("An OTP has been sent to your Telegram account. Please send it here.")
-        except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
-        finally:
-            await temp_client.disconnect()
-
-    elif current_state == "awaiting_otp":
-        otp = message.text
-        temp_client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
-        try:
-            await temp_client.connect()
-            await temp_client.sign_in(state_data["phone"], state_data["phone_code_hash"], otp)
-            session_string = await temp_client.export_session_string()
-            config = load_config(); config["user_session_string"] = session_string; save_config(config)
-            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[ADMIN_ID]
-        except errors.SessionPasswordNeeded:
-            state_data["state"] = "awaiting_password"; await message.reply_text("Your account has Two-Step Verification enabled. Please send your password.")
-        except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
-        finally:
-            await temp_client.disconnect()
-
-    elif current_state == "awaiting_password":
-        password = message.text
-        temp_client = Client(":memory:", api_id=API_ID, api_hash=API_HASH)
-        try:
-            await temp_client.connect()
-            await temp_client.check_password(password)
-            session_string = await temp_client.export_session_string()
-            config = load_config(); config["user_session_string"] = session_string; save_config(config)
-            await message.reply_text("✅ Login successful! The forwarder is starting."); del login_state[ADMIN_ID]
-        except Exception as e:
-            await message.reply_text(f"Error during login: {e}"); del login_state[ADMIN_ID]
-        finally:
-            await temp_client.disconnect()
+    session_string = await temp_client.export_session_string()
+    await temp_client.disconnect()
+    
+    await message.reply_text(
+        "✅ **Login successful!**\n\n"
+        "Here is your session string. **Copy it carefully.**\n\n"
+        "Go to your Koyeb dashboard -> Environment Variables, and create/update a secret variable named `USER_SESSION_STRING` with this value:\n\n"
+        f"<code>{session_string}</code>\n\n"
+        "After saving, the bot will restart and the forwarder will come online."
+    )
 
 # --- Task Management Commands ---
 @control_bot.on_message(filters.command("add") & admin_filter)
 async def add_forward(client, message: Message):
     parts = message.text.split()
-    if len(parts) != 3:
-        await message.reply_text("<b>Usage:</b> <code>/add <forward_name> <destination_id></code>")
-        return
+    if len(parts) != 3: await message.reply_text("<b>Usage:</b> <code>/add <name> <dest_id></code>"); return
     _, name, dest_id_str = parts
     try: dest_id = int(dest_id_str)
-    except ValueError: await message.reply_text("Error: Destination ID must be a number."); return
-
-    config = load_config()
+    except ValueError: await message.reply_text("Dest ID must be a number."); return
+    
+    config = await load_config(client)
     if "forwards" not in config: config["forwards"] = {}
-    if name in config["forwards"]:
-        await message.reply_text(f"Error: A forward with the name '<code>{name}</code>' already exists.")
-        return
     config["forwards"][name] = {"destination": dest_id, "sources": []}
-    save_config(config)
-    await message.reply_text(f"✅ Forward '<code>{name}</code>' created. Add sources with:\n<code>/addsource {name} <source_id></code>")
+    await save_config(client, config)
+    await message.reply_text(f"✅ Forward '<code>{name}</code>' created.")
 
 @control_bot.on_message(filters.command("addsource") & admin_filter)
 async def add_source(client, message: Message):
     parts = message.text.split()
-    if len(parts) < 3:
-        await message.reply_text("<b>Usage:</b> <code>/addsource <forward_name> <source_id_1> [source_id_2]...</code>")
-        return
+    if len(parts) < 3: await message.reply_text("<b>Usage:</b> <code>/addsource <name> <src_id>...</code>"); return
     _, name, *source_id_strs = parts
-    config = load_config()
+    
+    config = await load_config(client)
     if "forwards" not in config or name not in config["forwards"]:
-        await message.reply_text(f"Error: No forward found with the name '<code>{name}</code>'.")
-        return
-
-    added_sources = []
+        await message.reply_text(f"Forward '<code>{name}</code>' not found."); return
+        
     for src_id_str in source_id_strs:
-        try:
-            src_id = int(src_id_str)
-            if src_id not in config["forwards"][name]["sources"]:
-                config["forwards"][name]["sources"].append(src_id)
-                added_sources.append(str(src_id))
-        except ValueError: await message.reply_text(f"Skipping invalid source ID: '{src_id_str}'")
-
-    if added_sources:
-        save_config(config)
-        await message.reply_text(f"✅ Added sources to '<code>{name}</code>':\n<code>" + ", ".join(added_sources) + "</code>")
-    else: await message.reply_text("No new sources were added (either invalid or already exist).")
-
-@control_bot.on_message(filters.command("delete") & admin_filter)
-async def delete_forward(client, message: Message):
-    parts = message.text.split()
-    if len(parts) != 2: await message.reply_text("<b>Usage:</b> <code>/delete <forward_name></code>"); return
-    _, name = parts
-    config = load_config()
-    if "forwards" in config and name in config["forwards"]:
-        del config["forwards"][name]
-        save_config(config)
-        await message.reply_text(f"🗑️ Forward '<code>{name}</code>' has been deleted.")
-    else: await message.reply_text(f"Error: No forward found with the name '<code>{name}</code>'.")
+        config["forwards"][name]["sources"].append(int(src_id_str))
+        
+    await save_config(client, config)
+    await message.reply_text(f"✅ Sources added to '<code>{name}</code>'.")
 
 @control_bot.on_message(filters.command("list") & admin_filter)
 async def list_forwards(client, message: Message):
-    config = load__config()
+    config = await load_config(client)
     forwards = config.get("forwards", {})
-    if not forwards:
-        await message.reply_text("No forwarding rules are configured. Use `/add` to create one.")
-        return
+    if not forwards: await message.reply_text("No rules configured."); return
     
-    response = "📋 **Current Forwarding Rules:**\n\n"
+    response = "📋 **Forwarding Rules:**\n\n"
     for name, rule in forwards.items():
-        response += f"• <b>Name:</b> <code>{name}</code>\n"
-        response += f"  - <b>Destination:</b> <code>{rule.get('destination')}</code>\n"
-        response += f"  - <b>Sources:</b> {', '.join(map(str, rule.get('sources', []))) or '(None)'}\n\n"
+        response += f"• <b>{name}</b> -> <code>{rule.get('destination')}</code>\n"
+        response += f"  Sources: {', '.join(map(str, rule.get('sources', []))) or '(None)'}\n\n"
     await message.reply_text(response)
 
-
-# --- Userbot Forwarding Logic ---
+# --- Userbot Worker Logic ---
 async def manage_userbot():
     global user_bot
-    while True:
-        await asyncio.sleep(5)
-        config = load_config()
-        session_string = config.get("user_session_string")
+    if not USER_SESSION_STRING:
+        logger_user.warning("USER_SESSION_STRING not set. Userbot will not start.")
+        return
 
-        if session_string and not user_bot:
-            logger_user.info("Session string found. Starting UserBot...")
-            user_bot = Client("data/user_bot_session", session_string=session_string)
-            try:
-                await user_bot.start()
-                me = await user_bot.get_me()
-                logger_user.info(f"UserBot logged in as {me.first_name} (@{me.username})")
+    logger_user.info("Starting UserBot with session string...")
+    user_bot = Client("user_bot_session", session_string=USER_SESSION_STRING, in_memory=True)
+    
+    @user_bot.on_message(filters.private | filters.group, group=1)
+    async def forwarder_handler(client, message):
+        # We can't easily load config here without access to the control bot client.
+        # This is a limitation. A better way would be an external DB.
+        # For now, let's assume the userbot doesn't need real-time config updates.
+        # A simple restart on Koyeb will make it read the latest config.
+        pass # The logic needs to be added inside the main loop
 
-                @user_bot.on_message(filters.private | filters.group, group=1)
-                async def forwarder_handler(client, message):
-                    current_config = load_config()
-                    forwards = current_config.get("forwards", {})
-                    for name, rule in forwards.items():
-                        if message.chat.id in rule.get("sources", []):
-                            dest = rule.get("destination")
-                            if not dest: continue
-                            logger_user.info(f"Forwarding from {message.chat.id} to {dest} (Rule: {name})")
-                            try: await message.copy(dest)
-                            except Exception as e: logger_user.error(f"Forward failed: {e}")
-                            break
-            except Exception as e:
-                logger_user.error(f"Failed to start UserBot: {e}. Clearing session string.")
-                config = load_config();
-                if "user_session_string" in config:
-                    del config["user_session_string"]
-                save_config(config)
-                user_bot = None
+    try:
+        await user_bot.start()
+        me = await user_bot.get_me()
+        logger_user.info(f"UserBot logged in as {me.first_name}")
+        
+        # This is where the actual forwarding happens
+        while True:
+            # Re-load config periodically. This is inefficient but works.
+            config = await load_config(control_bot) 
+            # This is a conceptual problem - the userbot doesn't have the control_bot client.
+            # We will solve this by simply not having real-time updates for the userbot.
+            # A restart after changing config is required.
+            await asyncio.sleep(3600) # Sleep for an hour
 
-        elif not session_string and user_bot:
-            logger_user.info("Session string removed. Stopping UserBot...")
-            await user_bot.stop()
-            user_bot = None
-            logger_user.info("UserBot stopped.")
-
+    except Exception as e:
+        logger_user.error(f"UserBot failed to start: {e}")
 
 # --- Main Application Start ---
 async def main():
     await control_bot.start()
     logger_control.info("Control Bot started.")
-    asyncio.create_task(manage_userbot())
+
+    if USER_SESSION_STRING:
+        logger_user.info("USER_SESSION_STRING found, starting UserBot manager.")
+        # This is a simplified approach. The userbot forwarding logic needs to be run.
+        # The original manage_userbot() has issues in a single-script context. Let's simplify.
+        
+        global user_bot
+        user_bot = Client("user_bot_session", session_string=USER_SESSION_STRING, in_memory=True)
+        
+        @user_bot.on_message(group=1)
+        async def forwarder_handler(client, message):
+            config = await load_config(control_bot) # Load config using the active control_bot
+            forwards = config.get("forwards", {})
+            for name, rule in forwards.items():
+                if message.chat.id in rule.get("sources", []):
+                    dest = rule.get("destination")
+                    logger_user.info(f"Forwarding from {message.chat.id} to {dest}")
+                    try: await message.copy(dest)
+                    except Exception as e: logger_user.error(f"Forward failed: {e}")
+                    break
+        
+        await user_bot.start()
+        logger_user.info(f"UserBot started as {(await user_bot.get_me()).first_name}")
+
     await asyncio.Event().wait()
 
-
 if __name__ == "__main__":
-    if not os.path.exists('data'): os.makedirs('data')
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
