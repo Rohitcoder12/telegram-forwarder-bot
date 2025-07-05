@@ -1,4 +1,4 @@
-# app.py (FINAL - Corrected Startup Logic)
+# app.py (FINAL - With Correct Command Replies)
 import os
 import asyncio
 import threading
@@ -43,7 +43,7 @@ control_bot = Client("control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=
 user_bot = Client("user_bot_session", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH, in_memory=True) if SESSION_STRING else None
 admin_filter = filters.user(ADMIN_ID)
 
-# --- Configuration Management (These now require the user_bot client) ---
+# --- Configuration Management ---
 async def load_config():
     global config_message_id, config_cache
     if not user_bot or not user_bot.is_connected: return False
@@ -52,7 +52,6 @@ async def load_config():
             if msg.text and msg.text.startswith('{'):
                 config_message_id = msg.id
                 config_cache = json.loads(msg.text)
-                logger_control.info(f"Loaded config from message {config_message_id}")
                 return True
     except Exception as e:
         logger_user.error(f"UserBot could not read config channel: {e}")
@@ -71,10 +70,7 @@ async def save_config(config_data):
     else:
         try:
             msg = await user_bot.send_message(CONFIG_CHANNEL_ID, json_text)
-            # Pinning is not essential for the logic to work, so we can omit it if it causes issues.
-            # await user_bot.pin_chat_message(CONFIG_CHANNEL_ID, msg.id, disable_notification=True)
             config_message_id = msg.id
-            logger_control.info(f"UserBot created new config message: {config_message_id}")
         except Exception as e:
             logger_control.error(f"UserBot failed to create config message: {e}"); return False
             
@@ -95,7 +91,63 @@ async def bootstrap_command(client, message):
     else:
         await msg.edit_text("❌ Failed to create config message. Please check logs and ensure the user account is in the config channel.")
 
-# (Add your /add, /addsource, /delete, /list handlers here...)
+@control_bot.on_message(filters.command("add") & admin_filter)
+async def add_forward(client, message):
+    parts = message.text.split()
+    if len(parts) != 3: await message.reply_text("<b>Usage:</b> <code>/add <name> <dest_id></code>"); return
+    _, name, dest_id_str = parts; dest_id = int(dest_id_str)
+    
+    config = config_cache.copy()
+    if "forwards" not in config: config["forwards"] = {}
+    config["forwards"][name] = {"destination": dest_id, "sources": []}
+    if await save_config(config):
+        await message.reply_text(f"✅ Forward '<code>{name}</code>' created.")
+    else:
+        await message.reply_text("❌ Failed to save config.")
+
+@control_bot.on_message(filters.command("addsource") & admin_filter)
+async def add_source(client, message):
+    parts = message.text.split()
+    if len(parts) < 3: await message.reply_text("<b>Usage:</b> <code>/addsource <name> <src_id>...</code>"); return
+    _, name, *source_id_strs = parts
+    
+    config = config_cache.copy()
+    if name not in config.get("forwards", {}):
+        await message.reply_text(f"❌ Rule '<code>{name}</code>' not found."); return
+    for src_id in source_id_strs:
+        config["forwards"][name]["sources"].append(int(src_id))
+    if await save_config(config):
+        await message.reply_text(f"✅ Sources added to '<code>{name}</code>'.")
+    else:
+        await message.reply_text("❌ Failed to save config.")
+
+@control_bot.on_message(filters.command("delete") & admin_filter)
+async def delete_forward(client, message):
+    parts = message.text.split()
+    if len(parts) != 2: await message.reply_text("<b>Usage:</b> <code>/delete <name></code>"); return
+    _, name = parts
+    
+    config = config_cache.copy()
+    if name in config.get("forwards", {}):
+        del config["forwards"][name]
+        if await save_config(config):
+            await message.reply_text(f"🗑️ Rule '<code>{name}</code>' deleted.")
+        else:
+            await message.reply_text("❌ Failed to save config after deleting.")
+    else:
+        await message.reply_text(f"❌ Rule '<code>{name}</code>' not found.")
+
+@control_bot.on_message(filters.command("list") & admin_filter)
+async def list_forwards(client, message):
+    # This command reads from the cache, so it doesn't need to save
+    forwards = config_cache.get("forwards", {})
+    if not forwards: await message.reply_text("No rules configured."); return
+    
+    response = "📋 **Current Forwarding Rules:**\n\n"
+    for name, rule in forwards.items():
+        response += f"• <b>{name}</b> -> <code>{rule['destination']}</code>\n"
+        response += f"  Sources: {', '.join(map(str, rule.get('sources', []))) or '(None)'}\n\n"
+    await message.reply_text(response)
 
 # --- Userbot Handler ---
 @user_bot.on_message(~filters.service, group=1)
@@ -108,20 +160,20 @@ async def forwarder_handler(client, message):
             break
 
 # --- Main Application Start ---
+async def main():
+    if not user_bot:
+        logger_control.critical("SESSION_STRING not set. Exiting.")
+        return
+
+    await user_bot.start()
+    await load_config()
+    
+    await control_bot.start()
+    
+    await asyncio.Event().wait()
+
 if __name__ == "__main__":
-    # Start the Flask server in a separate thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    
     logger_control.info("Starting application...")
-
-    # Use the built-in run method which handles the event loop correctly
-    if user_bot:
-        user_bot.start()
-        logger_user.info("UserBot instance started.")
-        # Load the config right after userbot starts
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(load_config())
-    
-    control_bot.run()
-    logger_control.info("Control Bot has stopped.")
+    asyncio.run(main())
