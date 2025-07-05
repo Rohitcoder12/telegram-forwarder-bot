@@ -1,4 +1,4 @@
-# app.py (FINAL - "Telegram as Database" Version with Bug Fix)
+# app.py (FINAL - Corrected Bot Interaction Logic)
 import os
 import asyncio
 import threading
@@ -16,7 +16,7 @@ logger_user = logging.getLogger('UserBot')
 
 flask_app = Flask(__name__)
 @flask_app.route('/')
-def health_check(): return "Bot is alive and configurable!", 200
+def health_check(): return "Bot is alive!", 200
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
@@ -38,53 +38,71 @@ SESSION_STRING = get_env('SESSION_STRING', 'SESSION_STRING is optional', require
 config_message_id = None
 config_cache = {"forwards": {}}
 
-# --- Configuration Management (Telegram Channel) ---
-async def load_config(userbot_client):
-    global config_message_id, config_cache
-    try:
-        # CORRECTED: Get pinned messages directly
-        pinned_messages = await userbot_client.get_chat(CONFIG_CHANNEL_ID)
-        if pinned_messages.pinned_message:
-             msg = pinned_messages.pinned_message
-             if msg.text and msg.text.startswith('{'):
-                 config_message_id = msg.id
-                 config_cache = json.loads(msg.text)
-                 logger_control.info(f"Successfully loaded config from pinned message {config_message_id}")
-                 return
-    except Exception as e:
-        logger_user.error(f"UserBot could not read config channel history: {e}")
-    logger_control.warning("Could not find a valid pinned config message. Use /bootstrap.")
-
-async def save_config(userbot_client, config_data):
-    global config_message_id, config_cache
-    if not config_message_id:
-        try:
-            msg = await userbot_client.send_message(CONFIG_CHANNEL_ID, text=json.dumps(config_data, indent=4))
-            await userbot_client.pin_chat_message(CONFIG_CHANNEL_ID, msg.id, disable_notification=True)
-            config_message_id = msg.id
-            logger_control.info(f"UserBot bootstrapped and pinned new config message: {config_message_id}")
-        except Exception as e:
-            logger_control.error(f"UserBot failed to bootstrap config message: {e}")
-            return
-    else:
-        try:
-            await userbot_client.edit_message_text(CONFIG_CHANNEL_ID, config_message_id, json.dumps(config_data, indent=4))
-        except FloodWait as e:
-            await asyncio.sleep(e.x)
-            await save_config(userbot_client, config_data)
-        except Exception as e:
-            logger_control.error(f"UserBot failed to save config: {e}")
-    config_cache = config_data
-
 # --- Pyrogram Clients ---
 control_bot = Client("control_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
 user_bot = Client("user_bot_session", session_string=SESSION_STRING, api_id=API_ID, api_hash=API_HASH, in_memory=True) if SESSION_STRING else None
 admin_filter = filters.user(ADMIN_ID)
 
+# --- Configuration Management (These now require the user_bot client) ---
+async def load_config():
+    global config_message_id, config_cache
+    if not user_bot or not user_bot.is_connected:
+        logger_user.error("UserBot is not connected, cannot load config.")
+        return False
+    try:
+        # Get the single pinned message
+        async for msg in user_bot.get_chat_history(CONFIG_CHANNEL_ID, limit=1):
+            if msg.text and msg.text.startswith('{'):
+                # Check if this is our config message, maybe check for a specific keyword in it
+                config_message_id = msg.id
+                config_cache = json.loads(msg.text)
+                logger_control.info(f"Successfully loaded config from message {config_message_id}")
+                return True
+    except Exception as e:
+        logger_user.error(f"UserBot could not read config channel history: {e}")
+    logger_control.warning("Could not find a valid config message. Use /bootstrap.")
+    return False
+
+async def save_config(config_data):
+    global config_message_id, config_cache
+    if not user_bot or not user_bot.is_connected:
+        logger_user.error("UserBot is not connected, cannot save config.")
+        return False
+
+    json_text = json.dumps(config_data, indent=4)
+    if config_message_id:
+        try:
+            await user_bot.edit_message_text(CONFIG_CHANNEL_ID, config_message_id, json_text)
+        except Exception as e:
+            logger_control.error(f"UserBot failed to edit config message: {e}")
+            return False
+    else: # If no config message exists yet (bootstrapping)
+        try:
+            msg = await user_bot.send_message(CONFIG_CHANNEL_ID, json_text)
+            # You might need to give userbot admin rights to pin
+            # await user_bot.pin_chat_message(CONFIG_CHANNEL_ID, msg.id, disable_notification=True)
+            config_message_id = msg.id
+            logger_control.info(f"UserBot created new config message: {config_message_id}")
+        except Exception as e:
+            logger_control.error(f"UserBot failed to create config message: {e}")
+            return False
+            
+    config_cache = config_data
+    return True
+
 # --- Control Bot Commands ---
 @control_bot.on_message(filters.command("start") & admin_filter)
 async def start_command(client, message):
     await message.reply_text("👋 **Forwarder Bot is Online**\n\n- The Userbot forwarder is running.\n- Use `/add` and other commands to manage rules.")
+
+@control_bot.on_message(filters.command("bootstrap") & admin_filter)
+async def bootstrap_command(client, message):
+    msg = await message.reply_text("Attempting to create and pin a new config message in the config channel...")
+    initial_config = {"forwards": {}}
+    if await save_config(initial_config):
+         await msg.edit_text("✅ Successfully created a new config message. You can now use `/add`.")
+    else:
+        await msg.edit_text("❌ Failed to create config message. Please check logs and ensure the user account (not the bot) is in the config channel.")
 
 @control_bot.on_message(filters.command("add") & admin_filter)
 async def add_forward(client, message):
@@ -95,8 +113,10 @@ async def add_forward(client, message):
     config = config_cache.copy()
     if "forwards" not in config: config["forwards"] = {}
     config["forwards"][name] = {"destination": dest_id, "sources": []}
-    await save_config(user_bot, config)
-    await message.reply_text(f"✅ Forward '<code>{name}</code>' created.")
+    if await save_config(config):
+        await message.reply_text(f"✅ Forward '<code>{name}</code>' created.")
+    else:
+        await message.reply_text("❌ Failed to save config.")
 
 @control_bot.on_message(filters.command("addsource") & admin_filter)
 async def add_source(client, message):
@@ -107,12 +127,16 @@ async def add_source(client, message):
     config = config_cache.copy()
     if name not in config.get("forwards", {}):
         await message.reply_text(f"❌ Rule '<code>{name}</code>' not found."); return
+        
     for src_id in source_id_strs:
         config["forwards"][name]["sources"].append(int(src_id))
-    await save_config(user_bot, config)
-    await message.reply_text(f"✅ Sources added to '<code>{name}</code>'.")
+        
+    if await save_config(config):
+        await message.reply_text(f"✅ Sources added to '<code>{name}</code>'.")
+    else:
+        await message.reply_text("❌ Failed to save config.")
 
-# (Add your /delete and /list handlers here...)
+# (Add your /delete and /list handlers here, they follow the same `await save_config(config)` pattern)
 
 # --- Userbot Handler ---
 @user_bot.on_message(~filters.service, group=1)
@@ -121,10 +145,7 @@ async def forwarder_handler(client, message):
     if not forwards: return
     for name, rule in forwards.items():
         if message.chat.id in rule.get("sources", []):
-            try:
-                await message.copy(rule["destination"])
-            except Exception as e:
-                logger_user.error(f"Failed to forward: {e}")
+            await message.copy(rule["destination"])
             break
 
 # --- Main Application Start ---
@@ -133,11 +154,14 @@ async def main():
         logger_control.critical("SESSION_STRING not set. Exiting.")
         return
 
-    await user_bot.start()
-    logger_user.info(f"UserBot started as {(await user_bot.get_me()).first_name}.")
-    await load_config(user_bot)
+    # Start both clients concurrently
+    await asyncio.gather(
+        user_bot.start(),
+        control_bot.start()
+    )
     
-    await control_bot.start()
+    logger_user.info(f"UserBot started as {(await user_bot.get_me()).first_name}.")
+    await load_config() # Load the config using the now-active user_bot
     logger_control.info(f"Control Bot started as {(await control_bot.get_me()).first_name}.")
     
     await asyncio.Event().wait()
