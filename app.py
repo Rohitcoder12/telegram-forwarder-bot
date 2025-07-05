@@ -1,4 +1,4 @@
-# app.py (FINAL - "Telegram as Database" Version)
+# app.py (FINAL - "Telegram as Database" Version with Bug Fix)
 import os
 import asyncio
 import threading
@@ -36,18 +36,21 @@ CONFIG_CHANNEL_ID = get_env('CONFIG_CHANNEL_ID', 'CONFIG_CHANNEL_ID not set!', c
 SESSION_STRING = get_env('SESSION_STRING', 'SESSION_STRING is optional', required=False)
 
 config_message_id = None
-config_cache = {"forwards": {}} # In-memory cache
+config_cache = {"forwards": {}}
 
 # --- Configuration Management (Telegram Channel) ---
 async def load_config(userbot_client):
     global config_message_id, config_cache
     try:
-        async for msg in userbot_client.get_chat_history(CONFIG_CHANNEL_ID, limit=50):
-            if msg.is_pinned and msg.text and msg.text.startswith('{'):
-                config_message_id = msg.id
-                config_cache = json.loads(msg.text)
-                logger_control.info(f"Successfully loaded config from pinned message {config_message_id}")
-                return
+        # CORRECTED: Get pinned messages directly
+        pinned_messages = await userbot_client.get_chat(CONFIG_CHANNEL_ID)
+        if pinned_messages.pinned_message:
+             msg = pinned_messages.pinned_message
+             if msg.text and msg.text.startswith('{'):
+                 config_message_id = msg.id
+                 config_cache = json.loads(msg.text)
+                 logger_control.info(f"Successfully loaded config from pinned message {config_message_id}")
+                 return
     except Exception as e:
         logger_user.error(f"UserBot could not read config channel history: {e}")
     logger_control.warning("Could not find a valid pinned config message. Use /bootstrap.")
@@ -95,7 +98,21 @@ async def add_forward(client, message):
     await save_config(user_bot, config)
     await message.reply_text(f"✅ Forward '<code>{name}</code>' created.")
 
-# (Add your /addsource, /delete, /list handlers here...)
+@control_bot.on_message(filters.command("addsource") & admin_filter)
+async def add_source(client, message):
+    parts = message.text.split()
+    if len(parts) < 3: await message.reply_text("<b>Usage:</b> <code>/addsource <name> <src_id>...</code>"); return
+    _, name, *source_id_strs = parts
+    
+    config = config_cache.copy()
+    if name not in config.get("forwards", {}):
+        await message.reply_text(f"❌ Rule '<code>{name}</code>' not found."); return
+    for src_id in source_id_strs:
+        config["forwards"][name]["sources"].append(int(src_id))
+    await save_config(user_bot, config)
+    await message.reply_text(f"✅ Sources added to '<code>{name}</code>'.")
+
+# (Add your /delete and /list handlers here...)
 
 # --- Userbot Handler ---
 @user_bot.on_message(~filters.service, group=1)
